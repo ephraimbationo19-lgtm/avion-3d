@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Pilote d'Avion 3D</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0d1b2a;
+    color: #fff;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 12px;
+    touch-action: none;
+  }
+  h1 { font-size: 1.25rem; margin-bottom: 8px; letter-spacing: .5px; }
+  #game {
+    width: 100%;
+    max-width: 960px;
+    aspect-ratio: 3 / 2;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.6);
+    display: block;
+    background: #6aa9e0;
+  }
+  #hint { font-size: .85rem; color: #9bb7cf; margin-top: 10px; text-align: center; }
+  .pad {
+    display: none;
+    grid-template-columns: repeat(3, 64px);
+    grid-template-rows: repeat(2, 60px);
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .pad button {
+    border: none; border-radius: 12px;
+    background: #1d3557; color: #fff; font-size: 1.5rem;
+    box-shadow: 0 4px 0 #0b1a30;
+    user-select: none; -webkit-user-select: none;
+  }
+  .pad button:active { transform: translateY(3px); box-shadow: 0 1px 0 #0b1a30; }
+  .pad .l { grid-column: 1; grid-row: 2; }
+  .pad .r { grid-column: 3; grid-row: 2; }
+  .pad .u { grid-column: 2; grid-row: 1; }
+  .pad .d { grid-column: 2; grid-row: 2; }
+  @media (pointer: coarse) { .pad { display: grid; } #hint { display: none; } }
+</style>
+</head>
+<body>
+  <h1>✈️ Pilote d'Avion 3D</h1>
+  <canvas id="game" width="960" height="640"></canvas>
+  <p id="hint">← → : virer &nbsp;·&nbsp; ↑ ↓ : monter/descendre &nbsp;·&nbsp; R : recommencer</p>
+  <div class="pad">
+    <button class="u" data-k="ArrowUp">▲</button>
+    <button class="l" data-k="ArrowLeft">◀</button>
+    <button class="d" data-k="ArrowDown">▼</button>
+    <button class="r" data-k="ArrowRight">▶</button>
+  </div>
+
+<script>
+"use strict";
+const cv = document.getElementById("game");
+const ctx = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+const FOV = 75 * Math.PI / 180;
+const FOCAL = (H / 2) / Math.tan(FOV / 2);
+const NEAR = 0.3, GROUND_Y = 0, SPEED = 34;
+
+const add = (a,b) => [a[0]+b[0], a[1]+b[1], a[2]+b[2]];
+const sub = (a,b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+const mul = (a,s) => [a[0]*s, a[1]*s, a[2]*s];
+const dot = (a,b) => a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross = (a,b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const norm = a => { const l = Math.hypot(...a) || 1; return mul(a, 1/l); };
+const clamp = (v,lo,hi) => Math.max(lo, Math.min(hi, v));
+const rgb = c => `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+const shade = (c,f) => c.map(x => clamp(x*f, 0, 255));
+
+let camPos=[0,0,0], camR=[1,0,0], camU=[0,1,0], camF=[0,0,1];
+let lines = [], faces = [];
+const pressed = new Set();
+
+function worldToCam(p) {
+  const d = sub(p, camPos);
+  return [dot(d,camR), dot(d,camU), dot(d,camF)];
+}
+function project(c) {
+  const s = FOCAL / c[2];
+  return [W/2 + c[0]*s, H/2 - c[1]*s]; // canvas : y vers le bas
+}
+function intersectCam(a,b) {
+  const t = (NEAR - a[2]) / (b[2]-a[2]);
+  return add(a, mul(sub(b,a), t));
+}
+function clip(poly) {
+  const out = [];
+  for (let i=0;i<poly.length;i++) {
+    const a=poly[i], b=poly[(i+1)%poly.length];
+    const ai=a[2]>=NEAR, bi=b[2]>=NEAR;
+    if (ai&&bi) out.push(b);
+    else if (ai&&!bi) out.push(intersectCam(a,b));
+    else if (!ai&&bi) { out.push(intersectCam(a,b)); out.push(b); }
+  }
+  return out;
+}
+function addLine(p1,p2,color) {
+  let a=worldToCam(p1), b=worldToCam(p2);
+  if (a[2]<NEAR && b[2]<NEAR) return;
+  if (a[2]<NEAR || b[2]<NEAR) {
+    const m=intersectCam(a,b);
+    if (a[2]<NEAR) a=m; else b=m;
+  }
+  lines.push([project(a), project(b), color]);
+}
+function addFace(verts,color) {
+  let c = clip(verts.map(worldToCam));
+  if (c.length<3) return;
+  faces.push([c.map(project), c.reduce((s,p)=>s+p[2],0)/c.length, color]);
+}
+
+function flush() {
+  ctx.lineWidth = 1.5;
+  for (const [a,b,col] of lines) {
+    ctx.strokeStyle = rgb(col);
+    ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke();
+  }
+  faces.sort((x,y)=>y[1]-x[1]);
+  for (const [pts,,col] of faces) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = rgb(col); ctx.fill();
+    ctx.strokeStyle = rgb(shade(col,0.6)); ctx.stroke();
+  }
+  lines=[]; faces=[];
+}
+
+const PARTS = [
+  [[0,0,0.3],[0.45,0.45,2.6],[225,70,60]],
+  [[0,0,0],[4.3,0.12,0.65],[235,235,235]],
+  [[0,0,-2.0],[1.7,0.1,0.45],[235,235,235]],
+  [[0,0.9,-2.0],[0.12,0.9,0.5],[225,70,60]],
+  [[0,0.48,0.9],[0.36,0.28,0.8],[50,110,170]],
+];
+const BOX_FACES = [
+  [[4,5,6,7],1.0], [[0,3,2,1],0.55], [[1,5,6,2],0.8],
+  [[0,3,7,4],0.7], [[3,2,6,7],1.12], [[0,1,5,4],0.6],
+];
+
+const plane = {};
+let score=0, distance=0, rings=[], maxZ=0;
+function newRing(z) {
+  return { x:(Math.random()*70-35), y:12+Math.random()*53, z, r:9, flash:0 };
+}
+function reset() {
+  plane.x=0; plane.y=30; plane.z=0; plane.yaw=0; plane.pitch=0; plane.roll=0;
+  plane.prop=0; plane.prevZ=0; plane.crashed=false;
+  score=0; distance=0; rings=[]; maxZ=70;
+  for (let i=0;i<5;i++){ rings.push(newRing(maxZ)); maxZ+=70; }
+}
+reset();
+
+function basis(rolled) {
+  const cp=Math.cos(plane.pitch), sp=Math.sin(plane.pitch);
+  const f=[Math.sin(plane.yaw)*cp, sp, Math.cos(plane.yaw)*cp];
+  const r=norm([f[2],0,-f[0]]);
+  const u=norm(cross(f,r));
+  if (rolled) {
+    const cr=Math.cos(plane.roll), sr=Math.sin(plane.roll);
+    return [add(mul(r,cr),mul(u,sr)), add(mul(u,cr),mul(r,-sr)), f];
+  }
+  return [r,u,f];
+}
+function toWorld(v,r,u,f) {
+  return [plane.x+v[0]*r[0]+v[1]*u[0]+v[2]*f[0],
+          plane.y+v[0]*r[1]+v[1]*u[1]+v[2]*f[1],
+          plane.z+v[0]*r[2]+v[1]*u[2]+v[2]*f[2]];
+}
+
+function update(dt) {
+  if (plane.crashed) return;
+  const turn=1.6*dt, pit=1.2*dt;
+  if (pressed.has("ArrowLeft")) plane.yaw-=turn;
+  if (pressed.has("ArrowRight")) plane.yaw+=turn;
+  if (pressed.has("ArrowUp")) plane.pitch+=pit;
+  if (pressed.has("ArrowDown")) plane.pitch-=pit;
+  plane.yaw=clamp(plane.yaw,-1,1);
+  plane.pitch=clamp(plane.pitch,-0.8,0.8);
+  let target=0;
+  if (pressed.has("ArrowLeft")) target=0.5;
+  if (pressed.has("ArrowRight")) target=-0.5;
+  plane.roll += (target-plane.roll)*Math.min(1,4*dt);
+
+  const [r,u,f]=basis(false);
+  plane.prevZ=plane.z;
+  plane.x+=f[0]*SPEED*dt; plane.y+=f[1]*SPEED*dt; plane.z+=f[2]*SPEED*dt;
+  plane.prop+=22*dt;
+  distance+=SPEED*dt;
+  if (plane.y<GROUND_Y+1.5) plane.crashed=true;
+
+  for (const ring of rings) {
+    if (plane.prevZ<ring.z && ring.z<=plane.z &&
+        Math.hypot(plane.x-ring.x, plane.y-ring.y)<ring.r) {
+      score+=100; ring.flash=1;
+      Object.assign(ring,newRing(maxZ)); maxZ+=70;
+    }
+    if (ring.z<plane.z-20) { Object.assign(ring,newRing(maxZ)); maxZ+=70; }
+    ring.flash=Math.max(0,ring.flash-dt*2);
+  }
+}
+
+function drawGround() {
+  const x0=(Math.floor(plane.x/20)-10)*20;
+  const z0=(Math.floor(plane.z/20)-5)*20;
+  for (let x=x0;x<=x0+400;x+=20) addLine([x,0,z0-20],[x,0,z0+420],[45,95,75]);
+  for (let z=z0;z<=z0+420;z+=20)
+    addLine([x0-20,0,z],[x0+400,0,z], (Math.floor(z/20)%2===0)?[60,130,100]:[40,90,70]);
+}
+function drawRings() {
+  for (const ring of rings) {
+    const col = ring.flash>0 ? [120,255,140] : [255,200,60];
+    const pts=[];
+    for (let i=0;i<28;i++) {
+      const a=i*2*Math.PI/28;
+      pts.push([ring.x+ring.r*Math.cos(a), ring.y+ring.r*Math.sin(a), ring.z]);
+    }
+    for (let i=0;i<28;i++) addLine(pts[i], pts[(i+1)%28], col);
+  }
+}
+function drawPlane() {
+  const [r,u,f]=basis(true);
+  for (const [center,h,color] of PARTS) {
+    const [cx,cy,cz]=center, [hx,hy,hz]=h;
+    const v=[[cx-hx,cy-hy,cz-hz],[cx+hx,cy-hy,cz-hz],[cx+hx,cy+hy,cz-hz],[cx-hx,cy+hy,cz-hz],
+             [cx-hx,cy-hy,cz+hz],[cx+hx,cy-hy,cz+hz],[cx+hx,cy+hy,cz+hz],[cx-hx,cy+hy,cz+hz]];
+    const wv=v.map(p=>toWorld(p,r,u,f));
+    for (const [idxs,sf] of BOX_FACES) addFace(idxs.map(i=>wv[i]), shade(color,sf));
+  }
+  const ca=Math.cos(plane.prop), sa=Math.sin(plane.prop);
+  addLine(toWorld([-1.25*ca,-1.25*sa,3.05],r,u,f), toWorld([1.25*ca,1.25*sa,3.05],r,u,f), [40,40,45]);
+  addLine(toWorld([-1.25*sa,1.25*ca,3.05],r,u,f), toWorld([1.25*sa,-1.25*ca,3.05],r,u,f), [40,40,45]);
+}
+
+function render() {
+  const grad=ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,"#3f86cf"); grad.addColorStop(0.65,"#7fbce8"); grad.addColorStop(1,"#bfe0f5");
+  ctx.fillStyle=grad; ctx.fillRect(0,0,W,H);
+
+  const [r,u,f]=basis(false);
+  camPos=add(sub([plane.x,plane.y,plane.z], mul(f,19)), mul(u,6.5));
+  camF=f; camR=r; camU=norm(cross(f,r));
+
+  drawGround(); drawRings(); drawPlane(); flush();
+
+  ctx.textAlign="left"; ctx.textBaseline="top";
+  ctx.font="bold 24px system-ui"; ctx.fillStyle="#ffdc64";
+  ctx.fillText(`Score : ${score}`, 20, 16);
+  ctx.font="15px system-ui"; ctx.fillStyle="#cdeaff";
+  ctx.fillText(`Altitude : ${plane.y|0} m    Vitesse : ${SPEED}    Distance : ${distance|0} m`, 20, 48);
+
+  if (plane.crashed) {
+    ctx.fillStyle="rgba(0,0,0,.5)"; ctx.fillRect(0,0,W,H);
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.font="bold 56px system-ui"; ctx.fillStyle="#ff5a5a";
+    ctx.fillText("CRASH !", W/2, H/2+30);
+    ctx.font="22px system-ui"; ctx.fillStyle="#fff";
+    ctx.fillText("Appuyez sur R pour redécoller", W/2, H/2-35);
+  }
+}
+
+let last=performance.now();
+function loop(now) {
+  const dt=Math.min((now-last)/1000, 0.05); last=now;
+  update(dt); render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// clavier
+const handled = new Set(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Space"]);
+addEventListener("keydown", e => {
+  if (handled.has(e.code)) e.preventDefault();
+  pressed.add(e.code);
+  if (e.code==="KeyR" && plane.crashed) reset();
+});
+addEventListener("keyup", e => pressed.delete(e.code));
+
+// manette tactile
+document.querySelectorAll(".pad button").forEach(b => {
+  const k=b.dataset.k;
+  b.addEventListener("pointerdown", e=>{ e.preventDefault(); pressed.add(k); });
+  b.addEventListener("pointerup",   e=>{ e.preventDefault(); pressed.delete(k); });
+  b.addEventListener("pointercancel", ()=>pressed.delete(k));
+  b.addEventListener("pointerleave", ()=>pressed.delete(k));
+});
+</script>
+</body>
+</html>
