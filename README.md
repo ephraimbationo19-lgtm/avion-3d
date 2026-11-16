@@ -17,7 +17,7 @@ Ouvrez simplement [`web/index.html`](web/index.html) dans un navigateur
 
 Pour le partager avec des amis :
 1. Activez **GitHub Pages** dans les paramètres du dépôt (branche `main`, dossier `/root` ou `/web`).
-2. Envoyez le lien `https://<votre-pseudo>.github.io/avion-3d/web/` à vos amis.
+2. Envoyez ce lien à vos amis : **https://ephraimbationo19-lgtm.github.io/avion-3d/**
 
 💡 Fonctionne aussi sur **mobile** : des boutons tactiles apparaissent automatiquement.
 
